@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyrunner-ci"
+version = "0.1.0"
+description = "Execute GitHub Actions workflows locally — like make for your CI"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.12"
+authors = [
+    { name = "Delaunay", email = "anony@mous.com" },
+]
+keywords = ["github-actions", "ci", "workflow", "runner", "local", "devops"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "argklass",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "pre-commit",
+    "build",
+    "twine",
+]
+
+[project.urls]
+Homepage = "https://github.com/Delaunay/pyrunner"
+Repository = "https://github.com/Delaunay/pyrunner"
+Issues = "https://github.com/Delaunay/pyrunner/issues"
+
+[project.scripts]
+pyrunner = "runner.cli:main_force"
+runner = "runner.cli:main_force"
+
+[tool.setuptools.packages.find]
+include = ["runner*"]
+
+[tool.setuptools.package-data]
+"runner.data" = ["*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
