@@ -60,6 +60,7 @@ class ExpressionContext:
         job_status: str = "success",
         runner: dict[str, str] | None = None,
         needs: dict[str, Any] | None = None,
+        inputs: dict[str, str] | None = None,
     ):
         self.matrix = matrix or {}
         self.env = env or {}
@@ -69,6 +70,7 @@ class ExpressionContext:
         self.job_status = job_status
         self.runner = runner or {}
         self.needs = needs or {}
+        self.inputs = inputs or {}
 
 
 class StepContext:
@@ -227,8 +229,15 @@ def _resolve_context(expr: str, ctx: ExpressionContext) -> Any:
     if root == "secrets" and len(parts) >= 2:
         return ctx.secrets.get(rest, "")
 
-    if root == "github" and len(parts) >= 2:
+    if root in ("github", "forgejo", "forge", "gitea") and len(parts) >= 2:
+        # forgejo.* / forge.* / gitea.* are aliases for github.*
+        if rest.startswith("event.inputs.") and len(parts) >= 4:
+            input_key = ".".join(parts[3:])
+            return ctx.inputs.get(input_key, "")
         return ctx.github.get(rest, "")
+
+    if root == "inputs" and len(parts) >= 2:
+        return ctx.inputs.get(rest, "")
 
     if root == "runner" and len(parts) >= 2:
         return ctx.runner.get(rest, "")

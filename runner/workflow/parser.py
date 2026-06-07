@@ -123,6 +123,18 @@ class Job:
 
 
 @dataclass
+class WorkflowInput:
+    """A workflow_dispatch input definition."""
+
+    name: str
+    description: str = ""
+    required: bool = False
+    default: str = ""
+    type: str = "string"
+    options: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Workflow:
     """A parsed GitHub Actions workflow."""
 
@@ -133,6 +145,32 @@ class Workflow:
     env: dict[str, str] = field(default_factory=dict)
     defaults: Defaults | None = None
     concurrency: str | None = None
+
+    @property
+    def dispatch_inputs(self) -> dict[str, WorkflowInput]:
+        """Extract workflow_dispatch inputs from the on: field."""
+        if not isinstance(self.on, dict):
+            return {}
+        dispatch = self.on.get("workflow_dispatch")
+        if not isinstance(dispatch, dict):
+            return {}
+        raw_inputs = dispatch.get("inputs", {})
+        if not raw_inputs:
+            return {}
+        inputs = {}
+        for name, defn in raw_inputs.items():
+            if isinstance(defn, dict):
+                inputs[name] = WorkflowInput(
+                    name=name,
+                    description=defn.get("description", ""),
+                    required=bool(defn.get("required", False)),
+                    default=str(defn.get("default", "")),
+                    type=defn.get("type", "string"),
+                    options=defn.get("options", []),
+                )
+            else:
+                inputs[name] = WorkflowInput(name=name, default=str(defn) if defn else "")
+        return inputs
 
     def job_order(self) -> list[str]:
         """Topological sort of jobs based on `needs`."""

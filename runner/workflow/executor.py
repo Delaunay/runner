@@ -77,6 +77,7 @@ class ExecutionContext:
     workflow_defaults: Defaults | None = None
     needs: dict[str, Any] = field(default_factory=dict)
     skip_steps: list[str] = field(default_factory=list)
+    inputs: dict[str, str] = field(default_factory=dict)
 
     def expr_context(self) -> ExpressionContext:
         """Build expression context from current state."""
@@ -89,6 +90,7 @@ class ExecutionContext:
             job_status=self.job_status,
             runner={"os": sys.platform, "arch": os.uname().machine},
             needs=self.needs,
+            inputs=self.inputs,
         )
 
     def resolve_expr(self, text: str) -> str:
@@ -403,6 +405,25 @@ def _execute_action(step: Step, ctx: ExecutionContext) -> StepResult:
             if not sub_result.success and not composite_step.continue_on_error:
                 return StepResult(step=step, returncode=sub_result.returncode)
         return StepResult(step=step, returncode=0)
+
+    # Apply env vars exported by the action (e.g. JAVA_HOME from setup-java)
+    if result.exported_env:
+        ctx.env.update(result.exported_env)
+        if ctx.verbose:
+            for k in result.exported_env:
+                print(f"    → export {k}={result.exported_env[k][:60]}")
+
+    # Apply PATH additions from the action
+    if result.exported_path:
+        if ctx.job_workspace:
+            for p in result.exported_path:
+                ctx.job_workspace.append_path(p)
+        else:
+            # No workspace — apply directly to ctx.env["PATH"]
+            current = ctx.env.get("PATH", os.environ.get("PATH", ""))
+            ctx.env["PATH"] = ":".join(result.exported_path) + ":" + current
+        if ctx.verbose:
+            print(f"    → PATH += {len(result.exported_path)} entries")
 
     # Store outputs if the step has an id
     if step.id and result.outputs:
@@ -813,6 +834,7 @@ def execute_workflow(
     matrix: dict[str, str] | None = None,
     skip_steps: list[str] | None = None,
     skip_jobs: list[str] | None = None,
+    inputs: dict[str, str] | None = None,
 ) -> bool:
     """Execute a workflow (or a subset of its jobs/steps).
 
@@ -823,6 +845,13 @@ def execute_workflow(
 
     github_ctx = build_github_context(root)
     secret_store = create_default_store(root)
+
+    # Resolve workflow_dispatch inputs: user-provided values override defaults
+    resolved_inputs = {}
+    for name, defn in workflow.dispatch_inputs.items():
+        resolved_inputs[name] = defn.default
+    if inputs:
+        resolved_inputs.update(inputs)
 
     ctx = ExecutionContext(
         root=root,
@@ -836,6 +865,7 @@ def execute_workflow(
         secret_store=secret_store,
         workflow_defaults=workflow.defaults,
         skip_steps=skip_steps or [],
+        inputs=resolved_inputs,
     )
 
     job_ids = workflow.job_order()

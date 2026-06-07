@@ -211,13 +211,28 @@ def _parse_manifest(path: Path) -> ActionManifest:
 
 
 def build_input_env(manifest: ActionManifest, with_: dict[str, Any]) -> dict[str, str]:
-    """Build INPUT_* environment variables for an action."""
+    """Build INPUT_* environment variables for an action.
+
+    GitHub Actions convention: INPUT_{NAME.upper()} with spaces replaced by
+    underscores but hyphens preserved. @actions/core getInput() looks up
+    `INPUT_${name.replace(/ /g, '_').toUpperCase()}`.
+    """
     env = {}
+
+    # First apply defaults from manifest
     for name, input_def in manifest.inputs.items():
         value = with_.get(name)
         if value is None:
             value = input_def.default or ""
-        env[f"INPUT_{name.upper().replace('-', '_')}"] = str(value)
+        env_key = f"INPUT_{name.upper().replace(' ', '_')}"
+        env[env_key] = str(value)
+
+    # Then apply any with: keys not declared in inputs (actions can read arbitrary inputs)
+    for name, value in with_.items():
+        env_key = f"INPUT_{name.upper().replace(' ', '_')}"
+        if env_key not in env or with_.get(name) is not None:
+            env[env_key] = str(value)
+
     return env
 
 
@@ -256,6 +271,8 @@ class ActionResult:
     error: str = ""
     outputs: dict[str, str] = field(default_factory=dict)
     composite_steps: list[dict[str, Any]] | None = None
+    exported_env: dict[str, str] = field(default_factory=dict)
+    exported_path: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -285,6 +302,8 @@ def _execute_node(
     capture_output: bool = True,
 ) -> ActionResult:
     """Execute a JavaScript action with Node.js."""
+    import tempfile
+
     node = shutil.which("node")
     if not node:
         return ActionResult(returncode=1, error="node not found on PATH")
@@ -300,21 +319,76 @@ def _execute_node(
     if verbose:
         print(f"    → node {entry.name}")
 
-    result = subprocess.run(
-        [node, str(entry)],
-        cwd=action.path,
-        env=env,
-        capture_output=capture_output,
-        text=True,
-    )
+    # Create temp files for GITHUB_OUTPUT, GITHUB_STATE, GITHUB_ENV, GITHUB_PATH
+    # Actions use these to communicate outputs and state
+    with (
+        tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as out_f,
+        tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as state_f,
+        tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as env_f,
+        tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as path_f,
+    ):
+        output_file = out_f.name
+        state_file = state_f.name
+        env_file = env_f.name
+        path_file = path_f.name
 
-    outputs = _parse_node_outputs(result.stdout) if result.stdout else {}
+    # RUNNER_TOOL_CACHE: where setup-* actions install tools
+    workspace_root = Path(env.get("GITHUB_WORKSPACE", os.getcwd()))
+    tool_cache = workspace_root / ".workspace" / "tool-cache"
+    tool_cache.mkdir(parents=True, exist_ok=True)
 
-    return ActionResult(
-        returncode=result.returncode,
-        outputs=outputs,
-        error=result.stderr if result.returncode != 0 else "",
-    )
+    # RUNNER_TEMP: scratch directory for actions
+    runner_temp = workspace_root / ".workspace" / "runner-temp"
+    runner_temp.mkdir(parents=True, exist_ok=True)
+
+    action_env = {
+        **env,
+        "GITHUB_OUTPUT": output_file,
+        "GITHUB_STATE": state_file,
+        "GITHUB_ENV": env_file,
+        "GITHUB_PATH": path_file,
+        "GITHUB_ACTION_PATH": str(action.path),
+        "GITHUB_WORKSPACE": str(workspace_root),
+        "RUNNER_TOOL_CACHE": str(tool_cache),
+        "RUNNER_TEMP": str(runner_temp),
+        "RUNNER_OS": _runner_os(),
+        "RUNNER_ARCH": _runner_arch(),
+    }
+
+    try:
+        result = subprocess.run(
+            [node, str(entry)],
+            cwd=action.path,
+            env=action_env,
+            capture_output=capture_output,
+            text=True,
+        )
+
+        # Parse outputs from GITHUB_OUTPUT file
+        outputs = _parse_output_file(output_file)
+        # Also parse legacy ::set-output from stdout
+        if result.stdout:
+            outputs.update(_parse_node_outputs(result.stdout))
+
+        # Read env vars exported by the action (GITHUB_ENV)
+        exported_env = _parse_env_exports(env_file)
+
+        # Read PATH additions (GITHUB_PATH)
+        exported_path = _parse_path_exports(path_file)
+
+        return ActionResult(
+            returncode=result.returncode,
+            outputs=outputs,
+            exported_env=exported_env,
+            exported_path=exported_path,
+            error=result.stderr if result.returncode != 0 else "",
+        )
+    finally:
+        for f in (output_file, state_file, env_file, path_file):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
 
 
 def _execute_docker(
@@ -401,14 +475,91 @@ def _resolve_arg(arg: str, env: dict[str, str]) -> str:
     return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", replacer, arg)
 
 
+def _parse_output_file(path: str) -> dict[str, str]:
+    """Parse a GITHUB_OUTPUT file (key=value pairs, or multiline delimiter format)."""
+    outputs = {}
+    try:
+        with open(path) as f:
+            content = f.read()
+    except (OSError, FileNotFoundError):
+        return outputs
+
+    if not content.strip():
+        return outputs
+
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if "<<" in line:
+            # Multiline: key<<DELIMITER\nvalue\nDELIMITER
+            key, delimiter = line.split("<<", 1)
+            key = key.strip()
+            delimiter = delimiter.strip()
+            value_lines = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != delimiter:
+                value_lines.append(lines[i])
+                i += 1
+            outputs[key] = "\n".join(value_lines)
+        elif "=" in line:
+            key, value = line.split("=", 1)
+            outputs[key.strip()] = value
+        i += 1
+
+    return outputs
+
+
+def _parse_env_exports(path: str) -> dict[str, str]:
+    """Parse a GITHUB_ENV file written by an action.
+
+    Format: KEY=VALUE lines, or multiline KEY<<DELIMITER blocks.
+    """
+    return _parse_output_file(path)
+
+
+def _parse_path_exports(path: str) -> list[str]:
+    """Parse a GITHUB_PATH file (one directory per line)."""
+    try:
+        with open(path) as f:
+            content = f.read()
+    except (OSError, FileNotFoundError):
+        return []
+    return [line.strip() for line in content.splitlines() if line.strip()]
+
+
 def _parse_node_outputs(stdout: str) -> dict[str, str]:
-    """Parse ::set-output and GITHUB_OUTPUT-style outputs from stdout."""
+    """Parse ::set-output from stdout (legacy format)."""
     outputs = {}
     for line in stdout.splitlines():
-        # Legacy ::set-output format
         if line.startswith("::set-output name="):
             rest = line[len("::set-output name="):]
             if "::" in rest:
                 key, value = rest.split("::", 1)
                 outputs[key] = value
     return outputs
+
+
+def _runner_os() -> str:
+    """Return the RUNNER_OS value matching GitHub's convention."""
+    import sys
+    if sys.platform == "linux":
+        return "Linux"
+    if sys.platform == "darwin":
+        return "macOS"
+    if sys.platform == "win32":
+        return "Windows"
+    return sys.platform
+
+
+def _runner_arch() -> str:
+    """Return the RUNNER_ARCH value matching GitHub's convention."""
+    import platform
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "X64"
+    if machine in ("aarch64", "arm64"):
+        return "ARM64"
+    if machine in ("armv7l",):
+        return "ARM"
+    return machine.upper()

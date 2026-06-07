@@ -1,24 +1,23 @@
-"""CLI command to list available workflows."""
+"""CLI command to list available CI workflows (auto-detecting backend).
+
+The top-level `runner list` detects the CI system and delegates to:
+- runner.cli.github.list.List.execute()
+- runner.cli.forgejo.list.List.execute()
+- runner.cli.gitlab.list.List.execute()
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 from argklass.arguments import add_arguments
 from argklass.command import Command, newparser
 
-from runner.cli.utils import discover
-
-
-@dataclass
-class ListArguments:
-    root: str = ""
-    """Project root (defaults to cwd)."""
+from runner.cli.args import ListArguments
 
 
 class List(Command):
-    """List available workflows and their jobs/matrix."""
+    """List available CI workflows (auto-detects backend)."""
 
     name: str = "list"
 
@@ -29,30 +28,29 @@ class List(Command):
 
     @staticmethod
     def execute(args):
+        """Auto-detect the backend and delegate to the appropriate lister."""
+        from runner.workflow.backends import detect_backend, get_backend_by_name
+
         root = Path(args.root) if args.root else Path.cwd()
-        workflows = discover(root)
-        if not workflows:
-            return 1
 
-        print("Available workflows:\n")
-        for name, wf in workflows.items():
-            print(f"  {name}")
-            print(f"    file: {wf.path.name}")
-            for job_id, job in wf.jobs.items():
-                step_count = len(job.steps)
-                needs = f" (needs: {', '.join(job.needs)})" if job.needs else ""
-                matrix_info = ""
-                if job.strategy and job.strategy.matrix:
-                    keys = list(job.strategy.matrix.keys())
-                    combos = job.strategy.expand()
-                    matrix_info = f" [{len(combos)} combinations: {', '.join(keys)}]"
-                    for combo in combos:
-                        label = ", ".join(f"{k}={v}" for k, v in combo.items())
-                        print(f"      - {label}")
-                print(f"    • {job.display_name} ({step_count} steps){needs}{matrix_info}")
-            print()
+        if args.backend and args.backend != "auto":
+            backend = get_backend_by_name(args.backend)
+            if backend is None:
+                print(f"Unknown backend: {args.backend}")
+                print("Available: github, forgejo, gitlab, auto")
+                return 1
+        else:
+            backend = detect_backend(root)
 
-        return 0
+        if backend.name == "gitlab":
+            from runner.cli.gitlab.list import List as GitlabList
+            return GitlabList.execute(args)
+        elif backend.name == "forgejo":
+            from runner.cli.forgejo.list import List as ForgejoList
+            return ForgejoList.execute(args)
+        else:
+            from runner.cli.github.list import List as GithubList
+            return GithubList.execute(args)
 
 
 COMMANDS = [List]

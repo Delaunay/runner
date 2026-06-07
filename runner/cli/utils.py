@@ -5,13 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def discover(root: Path):
-    from runner.workflow.parser import discover_workflows
+def discover(root: Path, backend_name: str = "auto"):
+    """Discover workflows using the appropriate backend."""
+    from runner.workflow.backends import detect_backend, get_backend_by_name
 
-    workflows = discover_workflows(root)
+    if backend_name and backend_name != "auto":
+        backend = get_backend_by_name(backend_name)
+        if backend is None:
+            print(f"Unknown backend: {backend_name}")
+            print("Available: github, forgejo, gitlab, auto")
+            return {}
+    else:
+        backend = detect_backend(root)
+
+    workflows = backend.discover(root)
     if not workflows:
-        print(f"No workflows found under {root / '.github' / 'workflows'}")
-    return workflows
+        print(f"No workflows found (backend: {backend.name})")
+    return workflows, backend
 
 
 def find_workflow(query: str, workflows: dict):

@@ -196,6 +196,11 @@ class JobWorkspace:
         text = self.path_file.read_text()
         return [line.strip() for line in text.splitlines() if line.strip()]
 
+    def append_path(self, path: str) -> None:
+        """Add a directory to the GITHUB_PATH file."""
+        with open(self.path_file, "a") as f:
+            f.write(f"{path}\n")
+
     def get_github_env_vars(self) -> dict[str, str]:
         """Environment variables that mimic GitHub Actions runner env."""
         return {
